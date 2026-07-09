@@ -18,6 +18,7 @@ from starlette.routing import Mount, Route
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 DOCKHAND_URL = os.environ.get("DOCKHAND_URL", "http://localhost:3000")
+DOCKHAND_TOKEN = os.environ.get("DOCKHAND_TOKEN", "")
 DOCKHAND_COOKIE = os.environ.get("DOCKHAND_COOKIE", "")
 PORT = int(os.environ.get("PORT", "8000"))
 ROOT_PATH = os.environ.get("ROOT_PATH", "").rstrip("/")
@@ -32,7 +33,9 @@ def _headers() -> dict:
         "Content-Type": "application/json",
         "Accept": "application/json",
     }
-    if DOCKHAND_COOKIE:
+    if DOCKHAND_TOKEN:
+        h["Authorization"] = f"Bearer {DOCKHAND_TOKEN}"
+    elif DOCKHAND_COOKIE:
         h["Cookie"] = DOCKHAND_COOKIE
     return h
 
