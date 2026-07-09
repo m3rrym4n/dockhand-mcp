@@ -2,9 +2,11 @@
 
 An [MCP (Model Context Protocol)](https://modelcontextprotocol.io) server that exposes the [Dockhand](https://dockhand.pro) Docker management REST API as tools for LLMs such as Claude.
 
-Runs as a Docker-hosted SSE server — deploy it once, connect any MCP client over HTTP.
+Runs as a Docker-hosted Streamable HTTP server — deploy it once, connect any MCP client over HTTP.
 
-**This is a fork of [markhaines/dockhand-mcp](https://github.com/markhaines/dockhand-mcp), patched to authenticate via Dockhand's native Bearer token API instead of a session cookie.** Tokens (`dh_...`, generated under Dockhand's Settings/Profile → API Tokens) don't expire by default, unlike a session cookie which requires periodic manual re-extraction from a browser.
+**This is a fork of [markhaines/dockhand-mcp](https://github.com/markhaines/dockhand-mcp), with two changes from upstream:**
+1. Authenticates via Dockhand's native Bearer token API instead of a session cookie. Tokens (`dh_...`, generated under Dockhand's Settings/Profile → API Tokens) don't expire by default, unlike a session cookie which requires periodic manual re-extraction from a browser.
+2. Migrated from the deprecated HTTP+SSE transport (`GET /sse` + `POST /messages/`) to Streamable HTTP (a single `/mcp` endpoint), matching the current MCP spec and current Claude connector requirements. The original SSE transport caused custom-connector setup in Claude to fail with an unrelated-looking OAuth/Dynamic-Client-Registration error, since Claude's connector-onboarding probe logic has known rough edges around the older transport.
 
 ## Features
 
@@ -25,7 +27,7 @@ Runs as a Docker-hosted SSE server — deploy it once, connect any MCP client ov
 
 ## Deployment
 
-**No pre-built image is published for this fork** — the upstream `ghcr.io/markhaines/dockhand-mcp:latest` image does not include the token-auth patch. Build locally instead:
+**No pre-built image is published for this fork** — the upstream `ghcr.io/markhaines/dockhand-mcp:latest` image does not include these patches. Build locally instead:
 
 ```bash
 git clone https://github.com/m3rrym4n/dockhand-mcp
@@ -49,6 +51,8 @@ docker compose up -d --build
 
 ## Connecting to Claude
 
+The MCP endpoint is at `/mcp` (Streamable HTTP), not `/sse`.
+
 ### Claude Desktop
 
 Add this to your `claude_desktop_config.json`:
@@ -57,7 +61,7 @@ Add this to your `claude_desktop_config.json`:
 {
   "mcpServers": {
     "dockhand": {
-      "url": "http://your-server:8000/sse"
+      "url": "http://your-server:8000/mcp"
     }
   }
 }
@@ -66,8 +70,16 @@ Add this to your `claude_desktop_config.json`:
 ### Claude Code
 
 ```bash
-claude mcp add --transport sse dockhand http://your-server:8000/sse
+claude mcp add --transport http dockhand http://your-server:8000/mcp
 ```
+
+### Claude custom connector (claude.ai)
+
+Point the connector at `http://your-server:8000/mcp`. No OAuth Client ID is needed — this server is authless from Claude's perspective (the actual credential is the `DOCKHAND_TOKEN`, used only for the server's own calls to Dockhand).
+
+## Health check
+
+`GET /health` returns `{"service": "dockhand-mcp", "status": "ok"}` for basic liveness checks.
 
 ## Available Tools
 
