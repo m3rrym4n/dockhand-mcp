@@ -4,6 +4,8 @@ An [MCP (Model Context Protocol)](https://modelcontextprotocol.io) server that e
 
 Runs as a Docker-hosted SSE server — deploy it once, connect any MCP client over HTTP.
 
+**This is a fork of [markhaines/dockhand-mcp](https://github.com/markhaines/dockhand-mcp), patched to authenticate via Dockhand's native Bearer token API instead of a session cookie.** Tokens (`dh_...`, generated under Dockhand's Settings/Profile → API Tokens) don't expire by default, unlike a session cookie which requires periodic manual re-extraction from a browser.
+
 ## Features
 
 - Manage **containers**: list, inspect, create, start, stop, restart, remove, get logs
@@ -19,30 +21,18 @@ Runs as a Docker-hosted SSE server — deploy it once, connect any MCP client ov
 ## Requirements
 
 - Docker + Docker Compose
-- A running [Dockhand](https://dockhand.pro) instance
+- A running [Dockhand](https://dockhand.pro) instance, version 1.0.26 or later if using token auth (token auth was introduced in 1.0.25 but had a bug affecting Enterprise licenses, fixed in 1.0.26)
 
 ## Deployment
 
-The image is published automatically to `ghcr.io/markhaines/dockhand-mcp:latest` on every push to main.
-
-### Remote server (recommended)
-
-Copy `docker-compose.yml` to any machine with Docker and run:
+**No pre-built image is published for this fork** — the upstream `ghcr.io/markhaines/dockhand-mcp:latest` image does not include the token-auth patch. Build locally instead:
 
 ```bash
-DOCKHAND_URL=http://your-dockhand-host:3001 \
-DOCKHAND_COOKIE="connect.sid=s%3A..." \
-docker compose up -d
-```
-
-No build step — Docker pulls the pre-built image from the registry.
-
-### Local
-
-```bash
-git clone https://github.com/markhaines/dockhand-mcp
+git clone https://github.com/m3rrym4n/dockhand-mcp
 cd dockhand-mcp
-DOCKHAND_URL=http://localhost:3000 docker compose up -d
+DOCKHAND_URL=http://your-dockhand-host:3000 \
+DOCKHAND_TOKEN=dh_your_token_here \
+docker compose up -d --build
 ```
 
 ## Configuration
@@ -50,11 +40,12 @@ DOCKHAND_URL=http://localhost:3000 docker compose up -d
 | Variable | Default | Description |
 |---|---|---|
 | `DOCKHAND_URL` | `http://localhost:3000` | Base URL of your Dockhand instance |
-| `DOCKHAND_COOKIE` | _(empty)_ | Session cookie for authenticated instances (e.g. `connect.sid=s%3A...`) |
+| `DOCKHAND_TOKEN` | _(empty)_ | **Preferred.** Dockhand API token (`dh_...`), generated under Settings/Profile → API Tokens. Sent as `Authorization: Bearer <token>`. Does not expire unless you set an expiry when generating it. |
+| `DOCKHAND_COOKIE` | _(empty)_ | Fallback only, used if `DOCKHAND_TOKEN` is not set. Session cookie for authenticated instances (e.g. `connect.sid=s%3A...`), extracted manually from browser DevTools and requiring periodic re-extraction as the session expires. |
 | `PORT` | `8000` | Port the MCP server listens on |
 | `ROOT_PATH` | _(empty)_ | Public path prefix when serving behind a reverse proxy sub-path (e.g. `/dockhand`) |
 
-To get your session cookie when authentication is enabled, log in to Dockhand in your browser and copy the `connect.sid` cookie value from DevTools > Application > Cookies.
+**Security note:** Dockhand tokens carry exactly the same permissions as the user account that generated them — there is no token-specific scoping. On Dockhand's free tier (no RBAC), every user is effectively admin, so a token is full-access regardless of which account created it. Using a dedicated, non-personal Dockhand account to generate the token still gives a clean, separately-identifiable audit trail, even though it doesn't reduce privilege on the free tier. Dockhand's Enterprise-tier RBAC would allow a genuinely restricted role/environment scope on the generating user, which the token would then inherit.
 
 ## Connecting to Claude
 
