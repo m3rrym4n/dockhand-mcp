@@ -3,7 +3,7 @@ services:
     build: .
     container_name: dockhand-mcp
     ports:
-      - "8000:8000"
+      - "6003:8000"
     environment:
       - DOCKHAND_URL=${DOCKHAND_URL:-http://192.168.1.68:3003}
       - DOCKHAND_TOKEN=${DOCKHAND_TOKEN:-}
