@@ -1,10 +1,12 @@
 services:
   dockhand-mcp:
-    image: ghcr.io/markhaines/dockhand-mcp:latest
+    build: .
+    container_name: dockhand-mcp
     ports:
       - "8000:8000"
     environment:
-      - DOCKHAND_URL=${DOCKHAND_URL:-http://localhost:3000}
+      - DOCKHAND_URL=${DOCKHAND_URL:-http://192.168.1.68:3003}
+      - DOCKHAND_TOKEN=${DOCKHAND_TOKEN:-}
       - DOCKHAND_COOKIE=${DOCKHAND_COOKIE:-}
       - PORT=8000
       - ROOT_PATH=${ROOT_PATH:-}
