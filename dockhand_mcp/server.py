@@ -1,20 +1,18 @@
 """
 Dockhand MCP Server
 Exposes Dockhand's REST API as Model Context Protocol tools.
-Runs as an SSE HTTP server suitable for Docker deployment.
+Runs as a Streamable HTTP server suitable for Docker deployment.
 """
 
 import os
 import json
+from contextlib import asynccontextmanager
+from typing import Any
+
 import httpx
 import uvicorn
-from typing import Any
-from mcp.server import Server
-from mcp.server.sse import SseServerTransport
-from mcp import types
-from starlette.applications import Starlette
-from starlette.requests import Request
-from starlette.routing import Mount, Route
+from fastapi import FastAPI
+from mcp.server.fastmcp import FastMCP
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 DOCKHAND_URL = os.environ.get("DOCKHAND_URL", "http://localhost:3000")
@@ -22,8 +20,6 @@ DOCKHAND_TOKEN = os.environ.get("DOCKHAND_TOKEN", "")
 DOCKHAND_COOKIE = os.environ.get("DOCKHAND_COOKIE", "")
 PORT = int(os.environ.get("PORT", "8000"))
 ROOT_PATH = os.environ.get("ROOT_PATH", "").rstrip("/")
-
-app = Server("dockhand")
 
 
 # ── HTTP helpers ───────────────────────────────────────────────────────────────
@@ -68,674 +64,340 @@ def _fmt(data: Any) -> str:
     return json.dumps(data, indent=2)
 
 
-# ── Tool definitions ───────────────────────────────────────────────────────────
-
-TOOLS: list[types.Tool] = [
-    # ── Environments ──────────────────────────────────────────────────────────
-    types.Tool(
-        name="list_environments",
-        description="List all configured Docker environments in Dockhand.",
-        inputSchema={"type": "object", "properties": {}, "required": []},
-    ),
-    types.Tool(
-        name="get_dashboard_stats",
-        description="Get dashboard statistics (container counts, resource usage) for an environment.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "env": {"type": "integer", "description": "Environment ID (omit for default)"},
-            },
-            "required": [],
-        },
-    ),
-
-    # ── Containers ────────────────────────────────────────────────────────────
-    types.Tool(
-        name="list_containers",
-        description="List all containers in an environment.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "env": {"type": "integer", "description": "Environment ID"},
-            },
-            "required": [],
-        },
-    ),
-    types.Tool(
-        name="get_container",
-        description="Get detailed information about a specific container.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "id": {"type": "string", "description": "Container ID or name"},
-                "env": {"type": "integer", "description": "Environment ID"},
-            },
-            "required": ["id"],
-        },
-    ),
-    types.Tool(
-        name="create_container",
-        description=(
-            "Create (and optionally start) a new container. "
-            "Provide at minimum an 'image' field in the body."
-        ),
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "env": {"type": "integer", "description": "Environment ID"},
-                "image": {"type": "string", "description": "Image name and tag, e.g. nginx:latest"},
-                "name": {"type": "string", "description": "Container name (optional)"},
-                "command": {"type": "string", "description": "Override default command"},
-                "ports": {
-                    "type": "array",
-                    "description": "Port mappings [{hostPort, containerPort, protocol}]",
-                    "items": {"type": "object"},
-                },
-                "volumes": {
-                    "type": "array",
-                    "description": "Volume mounts [{source, target, readOnly}]",
-                    "items": {"type": "object"},
-                },
-                "env_vars": {
-                    "type": "object",
-                    "description": "Environment variables as key-value pairs",
-                },
-                "network": {"type": "string", "description": "Network mode or name"},
-                "restart_policy": {
-                    "type": "string",
-                    "enum": ["no", "always", "unless-stopped", "on-failure"],
-                    "description": "Restart policy",
-                },
-                "cpu_limit": {"type": "number", "description": "CPU limit (e.g. 0.5)"},
-                "memory_limit": {"type": "string", "description": "Memory limit (e.g. 512m, 1g)"},
-            },
-            "required": ["image"],
-        },
-    ),
-    types.Tool(
-        name="start_container",
-        description="Start a stopped container.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "id": {"type": "string", "description": "Container ID or name"},
-                "env": {"type": "integer", "description": "Environment ID"},
-            },
-            "required": ["id"],
-        },
-    ),
-    types.Tool(
-        name="stop_container",
-        description="Stop a running container.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "id": {"type": "string", "description": "Container ID or name"},
-                "env": {"type": "integer", "description": "Environment ID"},
-            },
-            "required": ["id"],
-        },
-    ),
-    types.Tool(
-        name="restart_container",
-        description="Restart a container.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "id": {"type": "string", "description": "Container ID or name"},
-                "env": {"type": "integer", "description": "Environment ID"},
-            },
-            "required": ["id"],
-        },
-    ),
-    types.Tool(
-        name="remove_container",
-        description="Remove (delete) a container.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "id": {"type": "string", "description": "Container ID or name"},
-                "env": {"type": "integer", "description": "Environment ID"},
-            },
-            "required": ["id"],
-        },
-    ),
-    types.Tool(
-        name="get_container_logs",
-        description="Retrieve recent logs from a container.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "id": {"type": "string", "description": "Container ID or name"},
-                "env": {"type": "integer", "description": "Environment ID"},
-                "tail": {"type": "integer", "description": "Number of log lines to return (default 100)"},
-            },
-            "required": ["id"],
-        },
-    ),
-
-    # ── Batch operations ──────────────────────────────────────────────────────
-    types.Tool(
-        name="batch_operation",
-        description=(
-            "Perform a bulk operation on multiple containers, images, volumes, networks, or stacks. "
-            "operations: start | stop | restart | remove | pause | unpause"
-        ),
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "env": {"type": "integer", "description": "Environment ID"},
-                "operation": {
-                    "type": "string",
-                    "enum": ["start", "stop", "restart", "remove", "pause", "unpause"],
-                },
-                "entityType": {
-                    "type": "string",
-                    "enum": ["containers", "images", "volumes", "networks", "stacks"],
-                },
-                "items": {
-                    "type": "array",
-                    "description": "Array of items, each with 'id' and optional 'name'",
-                    "items": {"type": "object"},
-                },
-            },
-            "required": ["operation", "entityType", "items"],
-        },
-    ),
-
-    # ── Stacks ────────────────────────────────────────────────────────────────
-    types.Tool(
-        name="list_stacks",
-        description="List all Docker Compose stacks.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "env": {"type": "integer", "description": "Environment ID"},
-            },
-            "required": [],
-        },
-    ),
-    types.Tool(
-        name="create_stack",
-        description="Create and deploy a new Docker Compose stack.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "env": {"type": "integer", "description": "Environment ID"},
-                "name": {"type": "string", "description": "Stack / Compose project name"},
-                "composeContent": {"type": "string", "description": "Full docker-compose.yml content"},
-                "envVars": {
-                    "type": "object",
-                    "description": "Environment variables as key-value pairs",
-                },
-            },
-            "required": ["name", "composeContent"],
-        },
-    ),
-    types.Tool(
-        name="start_stack",
-        description="Start (deploy) an existing stack.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "name": {"type": "string", "description": "Stack name"},
-                "env": {"type": "integer", "description": "Environment ID"},
-            },
-            "required": ["name"],
-        },
-    ),
-    types.Tool(
-        name="stop_stack",
-        description="Stop all containers in a stack.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "name": {"type": "string", "description": "Stack name"},
-                "env": {"type": "integer", "description": "Environment ID"},
-            },
-            "required": ["name"],
-        },
-    ),
-    types.Tool(
-        name="restart_stack",
-        description="Restart all containers in a stack.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "name": {"type": "string", "description": "Stack name"},
-                "env": {"type": "integer", "description": "Environment ID"},
-            },
-            "required": ["name"],
-        },
-    ),
-    types.Tool(
-        name="remove_stack",
-        description="Remove a stack and all its containers.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "name": {"type": "string", "description": "Stack name"},
-                "env": {"type": "integer", "description": "Environment ID"},
-            },
-            "required": ["name"],
-        },
-    ),
-
-    # ── Git stacks ────────────────────────────────────────────────────────────
-    types.Tool(
-        name="list_git_stacks",
-        description="List all Git-backed stacks.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "env": {"type": "integer", "description": "Environment ID"},
-            },
-            "required": [],
-        },
-    ),
-    types.Tool(
-        name="create_git_stack",
-        description="Create a new Git-backed stack.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "env": {"type": "integer", "description": "Environment ID"},
-                "name": {"type": "string", "description": "Stack name"},
-                "repository": {"type": "string", "description": "Git repository URL"},
-                "branch": {"type": "string", "description": "Branch to track"},
-                "composePath": {
-                    "type": "string",
-                    "description": "Path to compose file in repo (default: docker-compose.yml)",
-                },
-                "autoSync": {"type": "boolean", "description": "Enable automatic sync"},
-            },
-            "required": ["name", "repository"],
-        },
-    ),
-    types.Tool(
-        name="deploy_git_stack",
-        description="Deploy (sync and redeploy) a Git stack.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "id": {"type": "string", "description": "Git stack ID"},
-                "env": {"type": "integer", "description": "Environment ID"},
-            },
-            "required": ["id"],
-        },
-    ),
-
-    # ── Images ────────────────────────────────────────────────────────────────
-    types.Tool(
-        name="list_images",
-        description="List all Docker images in an environment.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "env": {"type": "integer", "description": "Environment ID"},
-            },
-            "required": [],
-        },
-    ),
-    types.Tool(
-        name="pull_image",
-        description="Pull a Docker image from a registry.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "env": {"type": "integer", "description": "Environment ID"},
-                "image": {"type": "string", "description": "Image name and tag, e.g. nginx:latest"},
-                "registry": {"type": "string", "description": "Registry name (optional, defaults to Docker Hub)"},
-            },
-            "required": ["image"],
-        },
-    ),
-    types.Tool(
-        name="push_image",
-        description="Push a Docker image to a configured registry.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "env": {"type": "integer", "description": "Environment ID"},
-                "image": {"type": "string", "description": "Image name and tag"},
-                "registry": {"type": "string", "description": "Target registry name"},
-                "tag": {"type": "string", "description": "New tag to apply (optional)"},
-            },
-            "required": ["image"],
-        },
-    ),
-    types.Tool(
-        name="remove_image",
-        description="Remove a Docker image.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "id": {"type": "string", "description": "Image ID"},
-                "env": {"type": "integer", "description": "Environment ID"},
-            },
-            "required": ["id"],
-        },
-    ),
-    types.Tool(
-        name="scan_image",
-        description="Scan a Docker image for vulnerabilities using Grype/Trivy.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "env": {"type": "integer", "description": "Environment ID"},
-                "image": {"type": "string", "description": "Image name and tag"},
-            },
-            "required": ["image"],
-        },
-    ),
-
-    # ── Volumes ───────────────────────────────────────────────────────────────
-    types.Tool(
-        name="list_volumes",
-        description="List all Docker volumes in an environment.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "env": {"type": "integer", "description": "Environment ID"},
-            },
-            "required": [],
-        },
-    ),
-    types.Tool(
-        name="create_volume",
-        description="Create a new Docker volume.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "env": {"type": "integer", "description": "Environment ID"},
-                "name": {"type": "string", "description": "Volume name"},
-                "driver": {"type": "string", "description": "Volume driver (default: local)"},
-            },
-            "required": ["name"],
-        },
-    ),
-    types.Tool(
-        name="remove_volume",
-        description="Remove a Docker volume (fails if in use).",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "name": {"type": "string", "description": "Volume name"},
-                "env": {"type": "integer", "description": "Environment ID"},
-            },
-            "required": ["name"],
-        },
-    ),
-
-    # ── Networks ──────────────────────────────────────────────────────────────
-    types.Tool(
-        name="list_networks",
-        description="List all Docker networks in an environment.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "env": {"type": "integer", "description": "Environment ID"},
-            },
-            "required": [],
-        },
-    ),
-    types.Tool(
-        name="create_network",
-        description="Create a new Docker network.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "env": {"type": "integer", "description": "Environment ID"},
-                "name": {"type": "string", "description": "Network name"},
-                "driver": {
-                    "type": "string",
-                    "enum": ["bridge", "host", "overlay", "macvlan", "none"],
-                    "description": "Network driver (default: bridge)",
-                },
-                "subnet": {"type": "string", "description": "CIDR subnet, e.g. 172.20.0.0/16"},
-                "gateway": {"type": "string", "description": "Gateway IP address"},
-                "internal": {"type": "boolean", "description": "Restrict external access"},
-                "attachable": {"type": "boolean", "description": "Allow manual container attachment"},
-            },
-            "required": ["name"],
-        },
-    ),
-    types.Tool(
-        name="remove_network",
-        description="Remove a Docker network.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "id": {"type": "string", "description": "Network ID"},
-                "env": {"type": "integer", "description": "Environment ID"},
-            },
-            "required": ["id"],
-        },
-    ),
-
-    # ── Activity & Schedules ──────────────────────────────────────────────────
-    types.Tool(
-        name="get_activity",
-        description="Get the container activity / event log.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "env": {"type": "integer", "description": "Environment ID"},
-            },
-            "required": [],
-        },
-    ),
-    types.Tool(
-        name="list_schedules",
-        description="List all scheduled tasks (auto-updates, Git syncs, cleanup jobs).",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "env": {"type": "integer", "description": "Environment ID"},
-            },
-            "required": [],
-        },
-    ),
-]
-
-
-# ── Tool handler ───────────────────────────────────────────────────────────────
-
-@app.list_tools()
-async def list_tools() -> list[types.Tool]:
-    return TOOLS
-
-
-@app.call_tool()
-async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
-    env = arguments.get("env")
-    params = {"env": env} if env is not None else {}
-
+def _call(fn, *args, **kwargs) -> str:
+    """Run an HTTP helper and format the result, with uniform error handling for every tool."""
     try:
-        result: Any = None
-
-        # ── Environments ──────────────────────────────────────────────────────
-        if name == "list_environments":
-            result = _get("/api/environments")
-
-        elif name == "get_dashboard_stats":
-            result = _get("/api/dashboard/stats", params=params)
-
-        # ── Containers ────────────────────────────────────────────────────────
-        elif name == "list_containers":
-            result = _get("/api/containers", params=params)
-
-        elif name == "get_container":
-            result = _get(f"/api/containers/{arguments['id']}", params=params)
-
-        elif name == "create_container":
-            body = {"image": arguments["image"]}
-            for key in ("name", "command", "ports", "volumes", "env_vars",
-                        "network", "restart_policy", "cpu_limit", "memory_limit"):
-                if key in arguments:
-                    body[key] = arguments[key]
-            result = _post("/api/containers", body=body, params=params)
-
-        elif name == "start_container":
-            result = _post(f"/api/containers/{arguments['id']}/start", params=params)
-
-        elif name == "stop_container":
-            result = _post(f"/api/containers/{arguments['id']}/stop", params=params)
-
-        elif name == "restart_container":
-            result = _post(f"/api/containers/{arguments['id']}/restart", params=params)
-
-        elif name == "remove_container":
-            result = _delete(f"/api/containers/{arguments['id']}", params=params)
-
-        elif name == "get_container_logs":
-            tail = arguments.get("tail", 100)
-            log_params = {**params, "tail": tail}
-            result = _get(f"/api/containers/{arguments['id']}/logs", params=log_params)
-
-        # ── Batch ─────────────────────────────────────────────────────────────
-        elif name == "batch_operation":
-            body = {
-                "operation": arguments["operation"],
-                "entityType": arguments["entityType"],
-                "items": arguments["items"],
-            }
-            result = _post("/api/batch", body=body, params=params)
-
-        # ── Stacks ────────────────────────────────────────────────────────────
-        elif name == "list_stacks":
-            result = _get("/api/stacks", params=params)
-
-        elif name == "create_stack":
-            body = {
-                "name": arguments["name"],
-                "composeContent": arguments["composeContent"],
-            }
-            if "envVars" in arguments:
-                body["envVars"] = arguments["envVars"]
-            result = _post("/api/stacks", body=body, params=params)
-
-        elif name == "start_stack":
-            result = _post(f"/api/stacks/{arguments['name']}/start", params=params)
-
-        elif name == "stop_stack":
-            result = _post(f"/api/stacks/{arguments['name']}/stop", params=params)
-
-        elif name == "restart_stack":
-            result = _post(f"/api/stacks/{arguments['name']}/restart", params=params)
-
-        elif name == "remove_stack":
-            result = _delete(f"/api/stacks/{arguments['name']}", params=params)
-
-        # ── Git stacks ────────────────────────────────────────────────────────
-        elif name == "list_git_stacks":
-            result = _get("/api/git/stacks", params=params)
-
-        elif name == "create_git_stack":
-            body = {
-                "name": arguments["name"],
-                "repository": arguments["repository"],
-            }
-            for key in ("branch", "composePath", "autoSync"):
-                if key in arguments:
-                    body[key] = arguments[key]
-            result = _post("/api/git/stacks", body=body, params=params)
-
-        elif name == "deploy_git_stack":
-            result = _post(f"/api/git/stacks/{arguments['id']}/deploy", params=params)
-
-        # ── Images ────────────────────────────────────────────────────────────
-        elif name == "list_images":
-            result = _get("/api/images", params=params)
-
-        elif name == "pull_image":
-            body = {"image": arguments["image"]}
-            if "registry" in arguments:
-                body["registry"] = arguments["registry"]
-            result = _post("/api/images/pull", body=body, params=params)
-
-        elif name == "push_image":
-            body = {"image": arguments["image"]}
-            for key in ("registry", "tag"):
-                if key in arguments:
-                    body[key] = arguments[key]
-            result = _post("/api/images/push", body=body, params=params)
-
-        elif name == "remove_image":
-            result = _delete(f"/api/images/{arguments['id']}", params=params)
-
-        elif name == "scan_image":
-            body = {"image": arguments["image"]}
-            result = _post("/api/images/scan", body=body, params=params)
-
-        # ── Volumes ───────────────────────────────────────────────────────────
-        elif name == "list_volumes":
-            result = _get("/api/volumes", params=params)
-
-        elif name == "create_volume":
-            body = {"name": arguments["name"]}
-            if "driver" in arguments:
-                body["driver"] = arguments["driver"]
-            result = _post("/api/volumes", body=body, params=params)
-
-        elif name == "remove_volume":
-            result = _delete(f"/api/volumes/{arguments['name']}", params=params)
-
-        # ── Networks ──────────────────────────────────────────────────────────
-        elif name == "list_networks":
-            result = _get("/api/networks", params=params)
-
-        elif name == "create_network":
-            body = {"name": arguments["name"]}
-            for key in ("driver", "subnet", "gateway", "internal", "attachable"):
-                if key in arguments:
-                    body[key] = arguments[key]
-            result = _post("/api/networks", body=body, params=params)
-
-        elif name == "remove_network":
-            result = _delete(f"/api/networks/{arguments['id']}", params=params)
-
-        # ── Activity & Schedules ──────────────────────────────────────────────
-        elif name == "get_activity":
-            result = _get("/api/activity", params=params)
-
-        elif name == "list_schedules":
-            result = _get("/api/schedules", params=params)
-
-        else:
-            return [types.TextContent(type="text", text=f"Unknown tool: {name}")]
-
-        return [types.TextContent(type="text", text=_fmt(result))]
-
+        return _fmt(fn(*args, **kwargs))
     except httpx.HTTPStatusError as e:
-        msg = f"HTTP {e.response.status_code}: {e.response.text}"
-        return [types.TextContent(type="text", text=msg)]
+        return f"HTTP {e.response.status_code}: {e.response.text}"
     except Exception as e:
-        return [types.TextContent(type="text", text=f"Error: {e}")]
+        return f"Error: {e}"
 
 
-# ── SSE transport & Starlette app ──────────────────────────────────────────────
-
-sse = SseServerTransport(f"{ROOT_PATH}/messages/")
-
-
-async def handle_sse(request: Request):
-    async with sse.connect_sse(request.scope, request.receive, request._send) as streams:
-        await app.run(streams[0], streams[1], app.create_initialization_options())
+def _env_params(env: int | None) -> dict:
+    return {"env": env} if env is not None else {}
 
 
-starlette_app = Starlette(
-    routes=[
-        Route("/sse", endpoint=handle_sse),
-        Mount("/messages/", app=sse.handle_post_message),
-    ]
-)
+# ── MCP server (Streamable HTTP) ────────────────────────────────────────────
+
+mcp = FastMCP("dockhand", stateless_http=True, streamable_http_path="/")
 
 
-# ── Entry point ────────────────────────────────────────────────────────────────
+# ── Environments ─────────────────────────────────────────────────────────────
+
+@mcp.tool()
+def list_environments() -> str:
+    """List all configured Docker environments in Dockhand."""
+    return _call(_get, "/api/environments")
+
+
+@mcp.tool()
+def get_dashboard_stats(env: int | None = None) -> str:
+    """Get dashboard statistics (container counts, resource usage) for an environment."""
+    return _call(_get, "/api/dashboard/stats", params=_env_params(env))
+
+
+# ── Containers ───────────────────────────────────────────────────────────────
+
+@mcp.tool()
+def list_containers(env: int | None = None) -> str:
+    """List all containers in an environment."""
+    return _call(_get, "/api/containers", params=_env_params(env))
+
+
+@mcp.tool()
+def get_container(id: str, env: int | None = None) -> str:
+    """Get detailed information about a specific container."""
+    return _call(_get, f"/api/containers/{id}", params=_env_params(env))
+
+
+@mcp.tool()
+def create_container(
+    image: str,
+    env: int | None = None,
+    name: str | None = None,
+    command: str | None = None,
+    ports: list | None = None,
+    volumes: list | None = None,
+    env_vars: dict | None = None,
+    network: str | None = None,
+    restart_policy: str | None = None,
+    cpu_limit: float | None = None,
+    memory_limit: str | None = None,
+) -> str:
+    """Create (and optionally start) a new container. Provide at minimum an 'image'.
+
+    restart_policy must be one of: no, always, unless-stopped, on-failure.
+    ports: list of {hostPort, containerPort, protocol}.
+    volumes: list of {source, target, readOnly}.
+    """
+    body: dict[str, Any] = {"image": image}
+    for key, value in (
+        ("name", name), ("command", command), ("ports", ports), ("volumes", volumes),
+        ("env_vars", env_vars), ("network", network), ("restart_policy", restart_policy),
+        ("cpu_limit", cpu_limit), ("memory_limit", memory_limit),
+    ):
+        if value is not None:
+            body[key] = value
+    return _call(_post, "/api/containers", body=body, params=_env_params(env))
+
+
+@mcp.tool()
+def start_container(id: str, env: int | None = None) -> str:
+    """Start a stopped container."""
+    return _call(_post, f"/api/containers/{id}/start", params=_env_params(env))
+
+
+@mcp.tool()
+def stop_container(id: str, env: int | None = None) -> str:
+    """Stop a running container."""
+    return _call(_post, f"/api/containers/{id}/stop", params=_env_params(env))
+
+
+@mcp.tool()
+def restart_container(id: str, env: int | None = None) -> str:
+    """Restart a container."""
+    return _call(_post, f"/api/containers/{id}/restart", params=_env_params(env))
+
+
+@mcp.tool()
+def remove_container(id: str, env: int | None = None) -> str:
+    """Remove (delete) a container."""
+    return _call(_delete, f"/api/containers/{id}", params=_env_params(env))
+
+
+@mcp.tool()
+def get_container_logs(id: str, env: int | None = None, tail: int = 100) -> str:
+    """Retrieve recent logs from a container."""
+    params = {**_env_params(env), "tail": tail}
+    return _call(_get, f"/api/containers/{id}/logs", params=params)
+
+
+# ── Batch operations ──────────────────────────────────────────────────────────
+
+@mcp.tool()
+def batch_operation(operation: str, entityType: str, items: list, env: int | None = None) -> str:
+    """Perform a bulk operation on multiple containers, images, volumes, networks, or stacks.
+
+    operation must be one of: start, stop, restart, remove, pause, unpause.
+    entityType must be one of: containers, images, volumes, networks, stacks.
+    items: array of objects, each with 'id' and optional 'name'.
+    """
+    body = {"operation": operation, "entityType": entityType, "items": items}
+    return _call(_post, "/api/batch", body=body, params=_env_params(env))
+
+
+# ── Stacks ────────────────────────────────────────────────────────────────────
+
+@mcp.tool()
+def list_stacks(env: int | None = None) -> str:
+    """List all Docker Compose stacks."""
+    return _call(_get, "/api/stacks", params=_env_params(env))
+
+
+@mcp.tool()
+def create_stack(name: str, composeContent: str, envVars: dict | None = None, env: int | None = None) -> str:
+    """Create and deploy a new Docker Compose stack."""
+    body: dict[str, Any] = {"name": name, "composeContent": composeContent}
+    if envVars is not None:
+        body["envVars"] = envVars
+    return _call(_post, "/api/stacks", body=body, params=_env_params(env))
+
+
+@mcp.tool()
+def start_stack(name: str, env: int | None = None) -> str:
+    """Start (deploy) an existing stack."""
+    return _call(_post, f"/api/stacks/{name}/start", params=_env_params(env))
+
+
+@mcp.tool()
+def stop_stack(name: str, env: int | None = None) -> str:
+    """Stop all containers in a stack."""
+    return _call(_post, f"/api/stacks/{name}/stop", params=_env_params(env))
+
+
+@mcp.tool()
+def restart_stack(name: str, env: int | None = None) -> str:
+    """Restart all containers in a stack."""
+    return _call(_post, f"/api/stacks/{name}/restart", params=_env_params(env))
+
+
+@mcp.tool()
+def remove_stack(name: str, env: int | None = None) -> str:
+    """Remove a stack and all its containers."""
+    return _call(_delete, f"/api/stacks/{name}", params=_env_params(env))
+
+
+# ── Git stacks ────────────────────────────────────────────────────────────────
+
+@mcp.tool()
+def list_git_stacks(env: int | None = None) -> str:
+    """List all Git-backed stacks."""
+    return _call(_get, "/api/git/stacks", params=_env_params(env))
+
+
+@mcp.tool()
+def create_git_stack(
+    name: str,
+    repository: str,
+    branch: str | None = None,
+    composePath: str | None = None,
+    autoSync: bool | None = None,
+    env: int | None = None,
+) -> str:
+    """Create a new Git-backed stack."""
+    body: dict[str, Any] = {"name": name, "repository": repository}
+    for key, value in (("branch", branch), ("composePath", composePath), ("autoSync", autoSync)):
+        if value is not None:
+            body[key] = value
+    return _call(_post, "/api/git/stacks", body=body, params=_env_params(env))
+
+
+@mcp.tool()
+def deploy_git_stack(id: str, env: int | None = None) -> str:
+    """Deploy (sync and redeploy) a Git stack."""
+    return _call(_post, f"/api/git/stacks/{id}/deploy", params=_env_params(env))
+
+
+# ── Images ────────────────────────────────────────────────────────────────────
+
+@mcp.tool()
+def list_images(env: int | None = None) -> str:
+    """List all Docker images in an environment."""
+    return _call(_get, "/api/images", params=_env_params(env))
+
+
+@mcp.tool()
+def pull_image(image: str, registry: str | None = None, env: int | None = None) -> str:
+    """Pull a Docker image from a registry."""
+    body: dict[str, Any] = {"image": image}
+    if registry is not None:
+        body["registry"] = registry
+    return _call(_post, "/api/images/pull", body=body, params=_env_params(env))
+
+
+@mcp.tool()
+def push_image(image: str, registry: str | None = None, tag: str | None = None, env: int | None = None) -> str:
+    """Push a Docker image to a configured registry."""
+    body: dict[str, Any] = {"image": image}
+    for key, value in (("registry", registry), ("tag", tag)):
+        if value is not None:
+            body[key] = value
+    return _call(_post, "/api/images/push", body=body, params=_env_params(env))
+
+
+@mcp.tool()
+def remove_image(id: str, env: int | None = None) -> str:
+    """Remove a Docker image."""
+    return _call(_delete, f"/api/images/{id}", params=_env_params(env))
+
+
+@mcp.tool()
+def scan_image(image: str, env: int | None = None) -> str:
+    """Scan a Docker image for vulnerabilities using Grype/Trivy."""
+    body = {"image": image}
+    return _call(_post, "/api/images/scan", body=body, params=_env_params(env))
+
+
+# ── Volumes ───────────────────────────────────────────────────────────────────
+
+@mcp.tool()
+def list_volumes(env: int | None = None) -> str:
+    """List all Docker volumes in an environment."""
+    return _call(_get, "/api/volumes", params=_env_params(env))
+
+
+@mcp.tool()
+def create_volume(name: str, driver: str | None = None, env: int | None = None) -> str:
+    """Create a new Docker volume."""
+    body: dict[str, Any] = {"name": name}
+    if driver is not None:
+        body["driver"] = driver
+    return _call(_post, "/api/volumes", body=body, params=_env_params(env))
+
+
+@mcp.tool()
+def remove_volume(name: str, env: int | None = None) -> str:
+    """Remove a Docker volume (fails if in use)."""
+    return _call(_delete, f"/api/volumes/{name}", params=_env_params(env))
+
+
+# ── Networks ──────────────────────────────────────────────────────────────────
+
+@mcp.tool()
+def list_networks(env: int | None = None) -> str:
+    """List all Docker networks in an environment."""
+    return _call(_get, "/api/networks", params=_env_params(env))
+
+
+@mcp.tool()
+def create_network(
+    name: str,
+    driver: str | None = None,
+    subnet: str | None = None,
+    gateway: str | None = None,
+    internal: bool | None = None,
+    attachable: bool | None = None,
+    env: int | None = None,
+) -> str:
+    """Create a new Docker network.
+
+    driver must be one of: bridge, host, overlay, macvlan, none (defaults to bridge).
+    """
+    body: dict[str, Any] = {"name": name}
+    for key, value in (
+        ("driver", driver), ("subnet", subnet), ("gateway", gateway),
+        ("internal", internal), ("attachable", attachable),
+    ):
+        if value is not None:
+            body[key] = value
+    return _call(_post, "/api/networks", body=body, params=_env_params(env))
+
+
+@mcp.tool()
+def remove_network(id: str, env: int | None = None) -> str:
+    """Remove a Docker network."""
+    return _call(_delete, f"/api/networks/{id}", params=_env_params(env))
+
+
+# ── Activity & Schedules ──────────────────────────────────────────────────────
+
+@mcp.tool()
+def get_activity(env: int | None = None) -> str:
+    """Get the container activity / event log."""
+    return _call(_get, "/api/activity", params=_env_params(env))
+
+
+@mcp.tool()
+def list_schedules(env: int | None = None) -> str:
+    """List all scheduled tasks (auto-updates, Git syncs, cleanup jobs)."""
+    return _call(_get, "/api/schedules", params=_env_params(env))
+
+
+# ── ASGI app & entry point ───────────────────────────────────────────────────
+
+mcp_app = mcp.streamable_http_app()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    async with mcp.session_manager.run():
+        yield
+
+
+app = FastAPI(title="dockhand-mcp", lifespan=lifespan)
+
+
+@app.get("/health")
+def health() -> dict[str, str]:
+    return {"service": "dockhand-mcp", "status": "ok"}
+
+
+app.mount(f"{ROOT_PATH}/mcp", mcp_app)
+
 
 def main():
-    uvicorn.run(starlette_app, host="0.0.0.0", port=PORT)
+    uvicorn.run(app, host="0.0.0.0", port=PORT)
 
 
 if __name__ == "__main__":
