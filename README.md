@@ -44,6 +44,7 @@ docker compose up -d --build
 | `DOCKHAND_URL` | `http://localhost:3000` | Base URL of your Dockhand instance |
 | `DOCKHAND_TOKEN` | _(empty)_ | **Preferred.** Dockhand API token (`dh_...`), generated under Settings/Profile → API Tokens. Sent as `Authorization: Bearer <token>`. Does not expire unless you set an expiry when generating it. |
 | `DOCKHAND_COOKIE` | _(empty)_ | Fallback only, used if `DOCKHAND_TOKEN` is not set. Session cookie for authenticated instances (e.g. `connect.sid=s%3A...`), extracted manually from browser DevTools and requiring periodic re-extraction as the session expires. |
+| `MCP_ALLOWED_HOSTS` | `localhost,127.0.0.1,192.168.1.68,192.168.1.79` | Comma-separated Host allowlist for the MCP HTTP transport. The MCP SDK uses this for DNS-rebinding protection and fails closed when an incoming Host header is not allowed. Bare hosts also allow any port for that host. |
 | `PORT` | `8000` | Port the MCP server listens on |
 | `ROOT_PATH` | _(empty)_ | Public path prefix when serving behind a reverse proxy sub-path (e.g. `/dockhand`) |
 
