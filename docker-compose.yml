@@ -8,6 +8,7 @@ services:
       - DOCKHAND_URL=${DOCKHAND_URL:-http://192.168.1.68:3003}
       - DOCKHAND_TOKEN=${DOCKHAND_TOKEN:-}
       - DOCKHAND_COOKIE=${DOCKHAND_COOKIE:-}
+      - MCP_ALLOWED_HOSTS=${MCP_ALLOWED_HOSTS:-localhost,127.0.0.1,192.168.1.68,192.168.1.79}
       - PORT=8000
       - ROOT_PATH=${ROOT_PATH:-}
     restart: unless-stopped

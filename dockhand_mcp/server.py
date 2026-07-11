@@ -13,13 +13,37 @@ import httpx
 import uvicorn
 from fastapi import FastAPI
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 
 # ── Configuration ─────────────────────────────────────────────────────────────
+DEFAULT_MCP_ALLOWED_HOSTS = "localhost,127.0.0.1,192.168.1.68,192.168.1.79"
 DOCKHAND_URL = os.environ.get("DOCKHAND_URL", "http://localhost:3000")
 DOCKHAND_TOKEN = os.environ.get("DOCKHAND_TOKEN", "")
 DOCKHAND_COOKIE = os.environ.get("DOCKHAND_COOKIE", "")
+MCP_ALLOWED_HOSTS = os.environ.get("MCP_ALLOWED_HOSTS", DEFAULT_MCP_ALLOWED_HOSTS)
 PORT = int(os.environ.get("PORT", "8000"))
 ROOT_PATH = os.environ.get("ROOT_PATH", "").rstrip("/")
+
+
+def _parse_allowed_hosts(value: str) -> list[str]:
+    hosts: list[str] = []
+    seen: set[str] = set()
+
+    for raw_host in value.split(","):
+        host = raw_host.strip()
+        if not host or host in seen:
+            continue
+
+        hosts.append(host)
+        seen.add(host)
+
+        if ":" not in host:
+            wildcard_port_host = f"{host}:*"
+            if wildcard_port_host not in seen:
+                hosts.append(wildcard_port_host)
+                seen.add(wildcard_port_host)
+
+    return hosts
 
 
 # ── HTTP helpers ───────────────────────────────────────────────────────────────
@@ -80,7 +104,14 @@ def _env_params(env: int | None) -> dict:
 
 # ── MCP server (Streamable HTTP) ────────────────────────────────────────────
 
-mcp = FastMCP("dockhand", stateless_http=True, streamable_http_path="/")
+mcp = FastMCP(
+    "dockhand",
+    stateless_http=True,
+    streamable_http_path="/",
+    transport_security=TransportSecuritySettings(
+        allowed_hosts=_parse_allowed_hosts(MCP_ALLOWED_HOSTS),
+    ),
+)
 
 
 # ── Environments ─────────────────────────────────────────────────────────────
