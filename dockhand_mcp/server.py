@@ -6,6 +6,8 @@ Runs as a Streamable HTTP server suitable for Docker deployment.
 
 import os
 import json
+import re
+import shlex
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -102,6 +104,19 @@ def _env_params(env: int | None) -> dict:
     return {"env": env} if env is not None else {}
 
 
+def _parse_memory_to_bytes(value: str) -> int:
+    """Convert a Docker-style memory value (for example ``512m``) to bytes."""
+    match = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*([kmgt]?)b?\s*", value, re.IGNORECASE)
+    if not match:
+        raise ValueError(
+            "memory_limit must be a number optionally followed by k, m, g, or t"
+        )
+
+    amount = float(match.group(1))
+    multiplier = 1024 ** ("kmgt".find(match.group(2).lower()) + 1) if match.group(2) else 1
+    return int(amount * multiplier)
+
+
 # ── MCP server (Streamable HTTP) ────────────────────────────────────────────
 
 mcp = FastMCP(
@@ -147,7 +162,7 @@ def create_container(
     image: str,
     env: int | None = None,
     name: str | None = None,
-    command: str | None = None,
+    command: str | list[str] | None = None,
     ports: list | None = None,
     volumes: list | None = None,
     env_vars: dict | None = None,
@@ -159,17 +174,39 @@ def create_container(
     """Create (and optionally start) a new container. Provide at minimum an 'image'.
 
     restart_policy must be one of: no, always, unless-stopped, on-failure.
-    ports: list of {hostPort, containerPort, protocol}.
+    command: shell-style string or argument list.
+    ports: list of {hostPort, containerPort, protocol, hostIp?}.
     volumes: list of {source, target, readOnly}.
+    memory_limit: byte count with optional k, m, g, or t suffix (for example 512m).
     """
     body: dict[str, Any] = {"image": image}
-    for key, value in (
-        ("name", name), ("command", command), ("ports", ports), ("volumes", volumes),
-        ("env_vars", env_vars), ("network", network), ("restart_policy", restart_policy),
-        ("cpu_limit", cpu_limit), ("memory_limit", memory_limit),
-    ):
-        if value is not None:
-            body[key] = value
+    if name is not None:
+        body["name"] = name
+    if command is not None:
+        body["cmd"] = shlex.split(command) if isinstance(command, str) else command
+    if ports is not None:
+        body["ports"] = {
+            f"{port['containerPort']}/{port.get('protocol', 'tcp')}": {
+                "HostPort": str(port["hostPort"]),
+                **({"HostIp": port["hostIp"]} if "hostIp" in port else {}),
+            }
+            for port in ports
+        }
+    if volumes is not None:
+        body["volumeBinds"] = [
+            f"{volume['source']}:{volume['target']}:{'ro' if volume.get('readOnly') else 'rw'}"
+            for volume in volumes
+        ]
+    if env_vars is not None:
+        body["env"] = [f"{key}={value}" for key, value in env_vars.items()]
+    if network is not None:
+        body["networkMode"] = network
+    if restart_policy is not None:
+        body["restartPolicy"] = restart_policy
+    if cpu_limit is not None:
+        body["nanoCpus"] = int(cpu_limit * 1_000_000_000)
+    if memory_limit is not None:
+        body["memory"] = _parse_memory_to_bytes(memory_limit)
     return _call(_post, "/api/containers", body=body, params=_env_params(env))
 
 
